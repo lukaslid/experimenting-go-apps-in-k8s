@@ -1,0 +1,85 @@
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: shared-pv
+  namespace: test
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+     - ReadWriteOnce
+  hostPath:
+    path: /mnt/shared-data # Path on the k3d node
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-pvc
+  namespace: test
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi
+---
+# Sample pod to write to the shared volume
+apiVersion: v1
+kind: Pod
+metadata:
+  name: writer-pod
+  namespace: test
+spec:
+  containers:
+    - name: writer
+      image: busybox
+      command: ["/bin/sh", "-c", "while true; do echo $(date) >> /data/file.txt; sleep 30; done"]
+      volumeMounts:
+        - mountPath: /data
+          name: shared-data
+  volumes:
+    - name: shared-data
+      persistentVolumeClaim:
+        claimName: shared-pvc
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: storage-sync-cron
+  namespace: test
+spec:
+  schedule: "*/5 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: storage-sync
+              image: k3d-myregistry.localhost:5000/storage-sync:latest
+              imagePullPolicy: IfNotPresent
+              args: [ "storage-sync-cli", "--backend", "minio", "--src", "/watched-data", "--trg", "/data", "--bucket", "watched-bucket", "--mode", "sync" ]
+              env:
+                - name: MINIO_ACCESS_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-creds
+                      key: MINIO_ROOT_USER
+                - name: MINIO_SECRET_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: minio-creds
+                      key: MINIO_ROOT_PASSWORD
+                - name: MINIO_ENDPOINT
+                  value: "minio.minio.svc.cluster.local:9000"
+                - name: MINIO_BUCKET
+                  value: "watched-bucket"
+                - name: MINIO_USE_SSL
+                  value: "false"
+              volumeMounts:
+                - mountPath: /watched-data
+                  name: shared-data
+          restartPolicy: OnFailure
+          volumes:
+            - name: shared-data
+              persistentVolumeClaim:
+                claimName: shared-pvc
